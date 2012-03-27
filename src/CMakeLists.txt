@@ -189,6 +189,7 @@ add_subdirectory (maketx)
 add_subdirectory (oiiotool)
 add_subdirectory (testtex)
 add_subdirectory (iv)
+add_subdirectory (framebuffer)
 # Add IO plugin directories
 if (NOT EMBEDPLUGINS)
     add_subdirectory (bmp.imageio)
