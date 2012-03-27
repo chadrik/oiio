@@ -4,8 +4,8 @@
 #include <iostream>
 int main(int argc, char *argv[])
 {
-    QCoreApplication::setOrganizationName("MadCrew");
-    QCoreApplication::setOrganizationDomain("madcrew.se");
+    QCoreApplication::setOrganizationName("OpenSource");
+    QCoreApplication::setOrganizationDomain("oiio.org");
     QCoreApplication::setApplicationName("Frame Buffer");
 
     QApplication a(argc, argv);
