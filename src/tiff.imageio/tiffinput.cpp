@@ -40,6 +40,7 @@
 #include "imageio.h"
 #include "thread.h"
 #include "strutil.h"
+#include "filesystem.h"
 #include "fmath.h"
 
 
@@ -79,6 +80,7 @@ public:
     TIFFInput () { init(); }
     virtual ~TIFFInput () { close(); }
     virtual const char * format_name (void) const { return "tiff"; }
+    virtual bool valid_file (const std::string &filename) const;
     virtual bool open (const std::string &name, ImageSpec &newspec);
     virtual bool open (const std::string &name, ImageSpec &newspec,
                        const ImageSpec &config);
@@ -284,6 +286,25 @@ my_error_handler (const char *str, const char *format, va_list ap)
 
 
 bool
+TIFFInput::valid_file (const std::string &filename) const
+{
+    FILE *file = Filesystem::fopen (filename, "r");
+    if (! file)
+        return false;  // needs to be able to open
+    unsigned short magic[2] = { 0, 0 };
+    fread (magic, sizeof(unsigned short), 2, file);
+    fclose (file);
+    if (magic[0] != TIFF_LITTLEENDIAN && magic[0] != TIFF_BIGENDIAN)
+        return false;  // not the right byte order
+    if ((magic[0] == TIFF_LITTLEENDIAN) != littleendian())
+        swap_endian (&magic[1], 1);
+    return (magic[1] == 42 /* Classic TIFF */ ||
+            magic[1] == 43 /* Big TIFF */);
+}
+
+
+
+bool
 TIFFInput::open (const std::string &name, ImageSpec &newspec)
 {
     m_filename = name;
@@ -340,7 +361,12 @@ TIFFInput::seek_subimage (int subimage, int miplevel, ImageSpec &newspec)
     }
 
     if (! m_tif) {
+#ifdef _WIN32
+        std::wstring wfilename = Filesystem::path_to_windows_native (m_filename);
+        m_tif = TIFFOpenW (wfilename.c_str(), "rm");
+#else
         m_tif = TIFFOpen (m_filename.c_str(), "rm");
+#endif
         if (m_tif == NULL) {
             error ("Could not open file: %s",
                    lasterr.length() ? lasterr.c_str() : m_filename.c_str());
@@ -734,7 +760,12 @@ TIFFInput::readspec (bool read_meta)
         // I'm not sure what state TIFFReadEXIFDirectory leaves us.
         // So to be safe, close and re-seek.
         TIFFClose (m_tif);
+#ifdef _WIN32
+        std::wstring wfilename = Filesystem::path_to_windows_native (m_filename);
+        m_tif = TIFFOpenW (wfilename.c_str(), "rm");
+#else
         m_tif = TIFFOpen (m_filename.c_str(), "rm");
+#endif
         TIFFSetDirectory (m_tif, m_subimage);
 
         // A few tidbits to look for

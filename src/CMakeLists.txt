@@ -1,4 +1,6 @@
 project (OpenImageIO)
+
+# Release version of the library
 set (OIIO_VERSION_MAJOR 1)
 set (OIIO_VERSION_MINOR 1)
 set (OIIO_VERSION_PATCH 0)
@@ -7,6 +9,7 @@ cmake_minimum_required (VERSION 2.6)
 if (NOT CMAKE_VERSION VERSION_LESS 2.8.4)
     cmake_policy (SET CMP0017 NEW)
 endif ()
+set (CMAKE_ALLOW_LOOSE_LOOP_CONSTRUCTS TRUE)
 message (STATUS "Project source dir = ${PROJECT_SOURCE_DIR}")
 message (STATUS "Project build dir = ${CMAKE_BINARY_DIR}")
 
@@ -14,10 +17,53 @@ if (${PROJECT_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
     message (FATAL_ERROR "Not allowed to run in-source build!")
 endif ()
 
-
 if (NOT CMAKE_BUILD_TYPE) 
     set (CMAKE_BUILD_TYPE "Release") 
 endif ()
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_definitions ("-DDEBUG=1")
+    set (DEBUGMODE ON)
+endif ()
+
+
+# Figure out which compiler we're using
+if (CMAKE_COMPILER_IS_GNUCC)
+    execute_process (COMMAND ${CMAKE_C_COMPILER} -dumpversion
+                     OUTPUT_VARIABLE GCC_VERSION
+                     OUTPUT_STRIP_TRAILING_WHITESPACE)
+    message (STATUS "Using gcc ${GCC_VERSION} as the compiler")
+endif ()
+if (NOT CMAKE_COMPILER_IS_CLANG)
+    message (STATUS "CMAKE_CXX_COMPILER is ${CMAKE_CXX_COMPILER}")
+    string (REGEX MATCH clang CMAKE_COMPILER_IS_CLANG ${CMAKE_CXX_COMPILER})
+    message (STATUS "CMAKE_COMPILER_IS_CLANG is '${CMAKE_COMPILER_IS_CLANG}'")
+    if (CMAKE_COMPILER_IS_CLANG)
+        set (CMAKE_COMPILER_IS_CLANG 1)
+        message (STATUS "Using clang as the compiler")
+    endif ()
+endif ()
+
+# Strict warnings
+if (NOT MSVC)
+    add_definitions ("-Wall")
+endif()
+
+if (CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNUCC)
+    # CMake doesn't automatically know what do do with
+    # include_directories(SYSTEM...) when using clang or gcc.
+    set (CMAKE_INCLUDE_SYSTEM_FLAG_CXX "-isystem ")
+endif ()
+
+if (CMAKE_COMPILER_IS_CLANG)
+    # Disable some warnings for Clang, for some things that are too awkward
+    # to change just for the sake of having no warnings.
+    add_definitions ("-Wno-unused-function")
+    add_definitions ("-Wno-overloaded-virtual")
+    # disable warning about unused command line arguments
+    add_definitions ("-Qunused-arguments")
+endif ()
+
+
 
 set (EMBEDPLUGINS ON CACHE BOOL "Embed format plugins in libOpenImageIO")
 set (BUILDSTATIC OFF CACHE BOOL "Build static library instead of shared")
@@ -78,22 +124,6 @@ include_directories(
     ${CMAKE_BINARY_DIR}/include/
 )
 
-# Strict warnings
-if (NOT WIN32)
-    add_definitions ("-Wall")
-endif()
-
-# Disable some warnings for Clang, it's a little too picky with boost
-if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-    add_definitions ("-Wno-parentheses")
-    add_definitions ("-Wno-char-subscripts")
-    add_definitions ("-Wno-unused-function")
-    add_definitions ("-Wno-overloaded-virtual")
-endif ()
-
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_definitions ("-DDEBUG=1")
-endif ()
 
 ###########################################################################
 # Paths for install tree customization.  Note that relative paths are relative
@@ -177,6 +207,12 @@ if (MSVC)
 endif (MSVC)
 
 
+# We want CTest for testing
+# N.B. This needs to be added before any of the subdirectories, or
+# their add_test commands will not register.
+include (CTest)
+
+
 # Tell CMake to process the sub-directories
 add_subdirectory (libOpenImageIO)
 
@@ -184,7 +220,6 @@ add_subdirectory (iconvert)
 add_subdirectory (idiff)
 add_subdirectory (igrep)
 add_subdirectory (iinfo)
-add_subdirectory (iprocess)
 add_subdirectory (maketx)
 add_subdirectory (oiiotool)
 add_subdirectory (testtex)
@@ -245,9 +280,6 @@ add_subdirectory (doc)
 #                    for "make testall", but not "make test".
 #
 
-# We want CTest for testing
-include (CTest)
-
 # Make a copy of the testsuite into the build area
 if (DEFINED CMAKE_VERSION AND NOT CMAKE_VERSION VERSION_LESS 2.8)
     file (COPY ${PROJECT_SOURCE_DIR}/../testsuite
@@ -255,14 +287,15 @@ if (DEFINED CMAKE_VERSION AND NOT CMAKE_VERSION VERSION_LESS 2.8)
 endif()
 
 # List all the individual testsuite tests here:
-oiio_add_tests (ico gpsread misnamed-file
-                oiiotool oiiotool-fixnan 
-                sgi rla psd dpx
-                texture-fill texture-gray texture-grid
+oiio_add_tests (ico gpsread misnamed-file nonwhole-tiles
+                oiiotool oiiotool-composite oiiotool-fixnan 
+                perchannel
+                sgi rla psd dpx png
+                texture-fill texture-filtersize
+                texture-gray texture-grid
                 texture-missing texture-overscan
                 texture-pointsample texture-width0blur texture-res
                 texture-skinny texture-fat
-                texture-field3d
                )
 
 
@@ -298,6 +331,9 @@ oiio_add_tests (webp
     IMAGEDIR webp-images
     URL http://code.google.com/speed/webp/gallery.html)
 
+oiio_add_tests (texture-field3d
+    FOUNDVAR FIELD3D_FOUND)
+
 
 #########################################################################
 # Packaging
@@ -313,8 +349,8 @@ set (CPACK_PACKAGE_FILE_NAME OpenImageIO-${OIIO_VERSION_MAJOR}.${OIIO_VERSION_MI
 #SET (CPACK_PACKAGE_INSTALL_DIRECTORY ${PROJECT_SOURCE_DIR}/..)
 exec_program ("cmake -E copy ${PROJECT_SOURCE_DIR}/../LICENSE ${CMAKE_BINARY_DIR}/License.txt")
 set (CPACK_RESOURCE_FILE_LICENSE "${CMAKE_BINARY_DIR}/License.txt")
-exec_program ("cmake -E copy ${PROJECT_SOURCE_DIR}/../README ${CMAKE_BINARY_DIR}/Readme.txt")
-set (CPACK_RESOURCE_FILE_README "${CMAKE_BINARY_DIR}/Readme.txt")
+exec_program ("cmake -E copy ${PROJECT_SOURCE_DIR}/../README.rst ${CMAKE_BINARY_DIR}/Readme.rst")
+set (CPACK_RESOURCE_FILE_README "${CMAKE_BINARY_DIR}/Readme.rst")
 set (CPACK_RESOURCE_FILE_WELCOME "${PROJECT_SOURCE_DIR}/doc/Welcome.txt")
 #SET (CPACK_STRIP_FILES Do we need this?)
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")

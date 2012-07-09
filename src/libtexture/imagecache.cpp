@@ -45,7 +45,6 @@ using namespace std::tr1;
 #include "varyingref.h"
 #include "ustring.h"
 #include "filesystem.h"
-#include "hash.h"
 #include "thread.h"
 #include "fmath.h"
 #include "strutil.h"
@@ -119,8 +118,6 @@ iorate_compare (const ImageCacheFileRef &a, const ImageCacheFileRef &b)
 
 
 
-#ifdef OIIO_HAVE_BOOST_UNORDERED_MAP
-
 /// Perform "map[key] = value", and set sweep_iter = end() if it is invalidated.
 ///
 /// For some reason, unordered_map::insert and operator[] may invalidate
@@ -141,23 +138,6 @@ void safe_insert (HashMapT& map, const typename HashMapT::key_type& key,
     if (nbuckets_pre_insert != map.bucket_count())
         sweep_iter = map.end ();
 }
-
-#else
-
-template<typename HashMapT>
-void safe_insert (HashMapT& map, const typename HashMapT::key_type& key,
-                  const typename HashMapT::mapped_type& value,
-                  typename HashMapT::iterator& /*sweep_iter*/)
-{
-    // Traditional implementations of hash_map don't typically invalidate
-    // iterators on insertion.
-    //   - VC++'s stdext::hash_map, according to msdn, and 
-    //   - The implementation coming with g++ according to some vague
-    //     indications in the SGI docs & other places on the web.
-    map[key] = value;
-}
-
-#endif
 
 
 };  // end anonymous namespace
@@ -313,7 +293,7 @@ ImageCacheFile::open (ImageCachePerThreadInfo *thread_info)
     m_input.reset (ImageInput::create (m_filename.c_str(),
                                        m_imagecache.plugin_searchpath().c_str()));
     if (! m_input) {
-        imagecache().error ("%s", OIIO_NAMESPACE::geterror().c_str());
+        imagecache().error ("%s", OIIO::geterror().c_str());
         m_broken = true;
         invalidate_spec ();
         return false;
@@ -379,6 +359,7 @@ ImageCacheFile::open (ImageCachePerThreadInfo *thread_info)
                     si.sscale = si.tscale = 1.0f;
                     si.soffset = si.toffset = 0.0f;
                 }
+                si.subimagename = ustring (tempspec.get_string_attribute("oiio:subimagename"));
             }
             if (tempspec.tile_width == 0 || tempspec.tile_height == 0) {
                 si.untiled = true;
@@ -414,6 +395,8 @@ ImageCacheFile::open (ImageCachePerThreadInfo *thread_info)
                 invalidate_spec ();
                 return false;
             }
+            // ImageCache can't store differing formats per channel
+            tempspec.channelformats.clear();
             LevelInfo levelinfo (tempspec, nativespec);
             si.levels.push_back (levelinfo);
             ++nmip;
@@ -563,11 +546,18 @@ ImageCacheFile::open (ImageCachePerThreadInfo *thread_info)
     // FIXME -- compute Mtex, Mras
 
     // See if there's a SHA-1 hash in the image description
-    std::string desc = spec.get_string_attribute ("ImageDescription");
-    const char *prefix = "SHA-1=";
-    size_t found = desc.rfind (prefix);
-    if (found != std::string::npos)
-        m_fingerprint = ustring (desc, found+strlen(prefix), 40);
+    std::string fing = spec.get_string_attribute ("oiio:SHA-1");
+    if (fing.length()) {
+        m_fingerprint = ustring(fing);
+    } else {
+        // If there was no "oiio:SHA-1" attribute, search for it as
+        // part of the ImageDescription.
+        std::string desc = spec.get_string_attribute ("ImageDescription");
+        const char *prefix = "SHA-1=";
+        size_t found = desc.rfind (prefix);
+        if (found != std::string::npos)
+            m_fingerprint = ustring (desc, found+strlen(prefix), 40);
+    }
 
     m_datatype = TypeDesc::FLOAT;
     if (! m_imagecache.forcefloat()) {
@@ -580,7 +570,7 @@ ImageCacheFile::open (ImageCachePerThreadInfo *thread_info)
     m_channelsize = m_datatype.size();
     m_pixelsize = m_channelsize * spec.nchannels;
     m_eightbit = (m_datatype == TypeDesc::UINT8);
-    m_mod_time = boost::filesystem::last_write_time (m_filename.string());
+    m_mod_time = Filesystem::last_write_time (m_filename.string());
 
     DASSERT (! m_broken);
     m_validspec = true;
@@ -662,7 +652,7 @@ ImageCacheFile::read_tile (ImageCachePerThreadInfo *thread_info,
             // TODO: should we attempt to close and re-open the file?
         }
         if (! ok)
-            imagecache().error ("%s", m_input->error_message().c_str());
+            imagecache().error ("%s", m_input->geterror().c_str());
     }
     if (ok) {
         size_t b = spec(subimage,miplevel).tile_bytes();
@@ -756,7 +746,7 @@ ImageCacheFile::read_unmipped (ImageCachePerThreadInfo *thread_info,
     }
 
     // Now convert and copy those values out to the caller's buffer
-    lores.copy_pixels (0, tw, 0, th, format, data);
+    lores.get_pixels (0, tw, 0, th, 0, 1, format, data);
 
     // Restore the microcache to the way it was before.
     thread_info->tile = oldtile;
@@ -821,7 +811,7 @@ ImageCacheFile::read_untiled (ImageCachePerThreadInfo *thread_info,
         for (int scanline = y0, i = 0; scanline <= y1 && ok; ++scanline, ++i) {
             ok = m_input->read_scanline (scanline, z, format, (void *)&buf[scanlinesize*i]);
             if (! ok)
-                imagecache().error ("%s", m_input->error_message().c_str());
+                imagecache().error ("%s", m_input->geterror().c_str());
         }
         size_t b = (y1-y0+1) * spec.scanline_bytes();
         thread_info->m_stats.bytes_read += b;
@@ -870,7 +860,7 @@ ImageCacheFile::read_untiled (ImageCachePerThreadInfo *thread_info,
         // No auto-tile -- the tile is the whole image
         ok = m_input->read_image (format, data, xstride, ystride, zstride);
         if (! ok)
-            imagecache().error ("%s", m_input->error_message().c_str());
+            imagecache().error ("%s", m_input->geterror().c_str());
         size_t b = spec.image_bytes();
         thread_info->m_stats.bytes_read += b;
         m_bytesread += b;
@@ -991,7 +981,7 @@ ImageCacheImpl::find_file (ustring filename,
             // but the SAME pixels?  It can happen!  Bad user, bad!  But
             // let's save them from their own foolishness.
             bool was_duplicate = false;
-            if (tf->fingerprint ()) {
+            if (tf->fingerprint() && m_deduplicate) {
                 // std::cerr << filename << " hash=" << tf->fingerprint() << "\n";
                 ImageCacheFile *dup = find_fingerprint (tf->fingerprint(), tf);
                 if (dup != tf) {
@@ -1257,6 +1247,7 @@ ImageCacheImpl::init ()
     m_accept_untiled = true;
     m_accept_unmipped = true;
     m_read_before_insert = false;
+    m_deduplicate = true;
     m_failure_retries = 0;
     m_latlong_y_up_default = true;
     m_Mw2c.makeIdentity();
@@ -1677,6 +1668,13 @@ ImageCacheImpl::attribute (const std::string &name, TypeDesc type,
             do_invalidate = true;
         }
     }
+    else if (name == "deduplicate" && type == TypeDesc::INT) {
+        int r = *(const int *)val;
+        if (r != m_deduplicate) {
+            m_deduplicate = r;
+            do_invalidate = true;
+        }
+    }
     else if (name == "failure_retries" && type == TypeDesc::INT) {
         m_failure_retries = *(const int *)val;
     }
@@ -1719,6 +1717,7 @@ ImageCacheImpl::getattribute (const std::string &name, TypeDesc type,
     ATTR_DECODE ("accept_untiled", int, m_accept_untiled);
     ATTR_DECODE ("accept_unmipped", int, m_accept_unmipped);
     ATTR_DECODE ("read_before_insert", int, m_read_before_insert);
+    ATTR_DECODE ("deduplicate", int, m_deduplicate);
     ATTR_DECODE ("failure_retries", int, m_failure_retries);
 
     // The cases that don't fit in the simple ATTR_DECODE scheme
@@ -2104,6 +2103,18 @@ ImageCacheImpl::imagespec (ustring filename, int subimage, int miplevel,
 
 
 
+int
+ImageCacheImpl::subimage_from_name (ImageCacheFile *file, ustring subimagename)
+{
+    for (int s = 0, send = file->subimages();  s < send;  ++s) {
+        if (file->subimageinfo(s).subimagename == subimagename)
+            return s;
+    }
+    return -1;  // No matching subimage name
+}
+
+
+
 bool
 ImageCacheImpl::get_pixels (ustring filename, int subimage, int miplevel,
                             int xbegin, int xend, int ybegin, int yend,
@@ -2331,7 +2342,7 @@ ImageCacheImpl::invalidate_all (bool force)
                 all_files.push_back (name);
                 continue;
             }
-            std::time_t t = boost::filesystem::last_write_time (name.string());
+            std::time_t t = Filesystem::last_write_time (name.string());
             // Invalidate the file if it has been modified since it was
             // last opened, or if 'force' is true.
             bool inval = force || (t != f->mod_time());
@@ -2450,7 +2461,7 @@ ImageCacheImpl::geterror () const
 
 
 void
-ImageCacheImpl::error (const char *message, ...)
+ImageCacheImpl::append_error (const std::string& message) const
 {
     std::string *errptr = m_errormessage.get ();
     if (! errptr) {
@@ -2462,10 +2473,7 @@ ImageCacheImpl::error (const char *message, ...)
             "Accumulated error messages > 16MB. Try checking return codes!");
     if (errptr->size())
         *errptr += '\n';
-    va_list ap;
-    va_start (ap, message);
-    *errptr += Strutil::vformat (message, ap);
-    va_end (ap);
+    *errptr += message;
 }
 
 

@@ -53,13 +53,29 @@ OIIO_PLUGIN_EXPORTS_END
 
 
 bool
+FitsInput::valid_file (const std::string &filename) const
+{
+    FILE *fd = Filesystem::fopen (filename, "rb");
+    if (!fd)
+        return false;
+
+    char magic[6] = {0};
+    bool ok = (fread (magic, 1, 6, fd) == 6) && !strncmp (magic, "SIMPLE", 6);
+
+    fclose (fd);
+    return ok;
+}
+
+
+
+bool
 FitsInput::open (const std::string &name, ImageSpec &spec)
 {
     // saving 'name' for later use
     m_filename = name;
 
     // checking if the file exists and can be opened in READ mode
-    m_fd = fopen (m_filename.c_str (), "rb");
+    m_fd = Filesystem::fopen (m_filename, "rb");
     if (!m_fd) {
         error ("Could not open file \"%s\"", m_filename.c_str ());
         return false;

@@ -62,6 +62,7 @@
 #include "strutil.h"
 #include "timer.h"
 #include "fmath.h"
+#include "ivutils.h"
 #include "sysutil.h"
 #include "filesystem.h"
 
@@ -447,12 +448,10 @@ ImageViewer::createMenus()
     fileMenu->addAction (exitAct);
     menuBar()->addMenu (fileMenu);
 
-    editMenu = new QMenu(tr("&Edit"), this);
     // Copy
     // Paste
     // Clear selection
     // radio: prioritize selection, crop selection
-    menuBar()->addMenu (editMenu);
 
     expgamMenu = new QMenu(tr("Exposure/gamma"));  // submenu
     expgamMenu->addAction (exposureMinusOneHalfStopAct);
@@ -1717,7 +1716,6 @@ ImageViewer::keyPressEvent (QKeyEvent *event)
 void
 ImageViewer::resizeEvent (QResizeEvent *event)
 {
-    QSize size = event->size();
     if (fitImageToWindowAct->isChecked ())
         fitImageToWindow ();
     QMainWindow::resizeEvent (event);
@@ -1780,13 +1778,8 @@ void ImageViewer::zoomIn()
     if (zoom() >= 64)
         return;
     float oldzoom = zoom ();
-    float newzoom;
-    if (zoom() >= 1.0f) {
-        newzoom = pow2roundup ((int) round (zoom()) + 1);
-    } else {
-        newzoom = 1.0 / std::max (1, pow2rounddown ((int) round(1.0/zoom()) - 1));
-    }
-
+    float newzoom = pow2roundupf (oldzoom);
+    
     float xc, yc;  // Center view position
     glwin->get_center (xc, yc);
     int xm, ym;  // Mouse position
@@ -1817,16 +1810,8 @@ void ImageViewer::zoomOut()
     if (zoom() <= 1.0f/64)
         return;
     float oldzoom = zoom ();
-    float newzoom;
-    if (zoom() > 1.0f) {
-        int z = pow2rounddown ((int) zoom() - 1);
-        newzoom = std::max ((float)z, 0.5f);
-    } else {
-        int z = (int)(1.0 / zoom() + 0.001);  // add for floating point slop
-        z = pow2roundup (z+1);
-        newzoom = 1.0f / z;
-    }
-
+    float newzoom = pow2rounddownf (oldzoom);
+    
     float xcpel, ycpel;  // Center view position
     glwin->get_center (xcpel, ycpel);
     int xmpel, ympel;  // Mouse position
@@ -1919,10 +1904,10 @@ void ImageViewer::fitWindowToImage (bool zoomok, bool minsize)
     if (! m_fullscreen) {
         QDesktopWidget *desktop = QApplication::desktop ();
         QRect availgeom = desktop->availableGeometry (this);
-        QRect screengeom = desktop->screenGeometry (this);
         int availwidth = availgeom.width() - extraw - 20;
         int availheight = availgeom.height() - extrah - menuBar()->height() - 20;
 #if 0
+        QRect screengeom = desktop->screenGeometry (this);
         std::cerr << "available desktop geom " << availgeom.x() << ' ' << availgeom.y() << ' ' << availgeom.width() << "x" << availgeom.height() << "\n";
         std::cerr << "screen desktop geom " << screengeom.x() << ' ' << screengeom.y() << ' ' << screengeom.width() << "x" << screengeom.height() << "\n";
 #endif
@@ -2000,7 +1985,7 @@ ImageViewer::about()
     QMessageBox::about(this, tr("About iv"),
             tr("<p><b>iv</b> is the image viewer for OpenImageIO.</p>"
                "<p>(c) Copyright 2008 Larry Gritz et al.  All Rights Reserved.</p>"
-               "<p>See http://openimageio.org for details.</p>"));
+               "<p>See <a href='http://openimageio.org'>http://openimageio.org</a> for details.</p>"));
 }
 
 

@@ -46,6 +46,52 @@ OIIO_NAMESPACE_ENTER
     using namespace pvt;
 
 
+
+// Default implementation of valid_file: try to do a full open.  If it
+// succeeds, it's the right kind of file.  We assume that most plugins
+// will override this with something smarter and much less expensive,
+// like reading just the first few bytes of the file to check for magic
+// numbers.
+bool
+ImageInput::valid_file (const std::string &filename) const
+{
+    ImageSpec tmpspec;
+    bool ok = const_cast<ImageInput *>(this)->open (filename, tmpspec);
+    if (ok)
+        const_cast<ImageInput *>(this)->close ();
+    return ok;
+}
+
+
+
+ImageInput *
+ImageInput::open (const std::string &filename,
+                  const ImageSpec *config)
+{
+    if (config == NULL) {
+        // Without config, this is really just a call to create-with-open.
+        return ImageInput::create (filename, true, std::string());
+    }
+
+    // With config, create without open, then try to open with config.
+    ImageInput *in = ImageInput::create (filename, false, std::string());
+    if (! in)
+        return NULL;  // create() failed
+    ImageSpec newspec;
+    if (in->open (filename, newspec, *config))
+        return in;   // creted fine, opened fine, return it
+
+    // The open failed.  Transfer the error from 'in' to the global OIIO
+    // error, delete the ImageInput we allocated, and return NULL.
+    std::string err = in->geterror();
+    if (err.size())
+        pvt::error ("%s", err.c_str());
+    delete in;
+    return NULL;
+}
+
+
+
 bool 
 ImageInput::read_scanline (int y, int z, TypeDesc format, void *data,
                            stride_t xstride)
@@ -86,13 +132,9 @@ ImageInput::read_scanline (int y, int z, TypeDesc format, void *data,
                              data, format, xstride, AutoStride, AutoStride);
     } else {
         // Per-channel formats -- have to convert/copy channels individually
-        if (native_data) {
-            ASSERT (contiguous && "Per-channel native input requires contiguous strides");
-        }
-        ASSERT (format != TypeDesc::UNKNOWN);
         ASSERT (m_spec.channelformats.size() == (size_t)m_spec.nchannels);
         size_t offset = 0;
-        for (int c = 0;  c < m_spec.nchannels;  ++c) {
+        for (int c = 0;  ok && c < m_spec.nchannels;  ++c) {
             TypeDesc chanformat = m_spec.channelformats[c];
             ok = convert_image (1 /* channels */, m_spec.width, 1, 1, 
                                 buf+offset, chanformat, 
@@ -186,8 +228,8 @@ ImageInput::read_scanlines (int ybegin, int yend, int z,
                 TypeDesc chanformat = m_spec.channelformats[c+firstchan];
                 ok = convert_image (1 /* channels */, m_spec.width, nscanlines, 1, 
                                     &buf[offset], chanformat, 
-                                    pixel_bytes, AutoStride, AutoStride,
-                                    (char *)data + c*m_spec.format.size(),
+                                    native_pixel_bytes, AutoStride, AutoStride,
+                                    (char *)data + c*format.size(),
                                     format, xstride, ystride, zstride);
                 offset += chanformat.size ();
             }
@@ -304,10 +346,6 @@ ImageInput::read_tile (int x, int y, int z, TypeDesc format, void *data,
                              data, format, xstride, ystride, zstride);
     } else {
         // Per-channel formats -- have to convert/copy channels individually
-        if (native_data) {
-            ASSERT (contiguous && "Per-channel native input requires contiguous strides");
-        }
-        ASSERT (format != TypeDesc::UNKNOWN);
         ASSERT (m_spec.channelformats.size() == (size_t)m_spec.nchannels);
         size_t offset = 0;
         for (int c = 0;  c < m_spec.nchannels;  ++c) {
@@ -398,6 +436,9 @@ ImageInput::read_tiles (int xbegin, int xend, int ybegin, int yend,
                                      : (format.size() * nchans);
     stride_t full_pixelsize = native_data ? m_spec.pixel_bytes(true)
                                           : (format.size() * m_spec.nchannels);
+    stride_t full_tilewidthbytes = full_pixelsize * m_spec.tile_width;
+    stride_t full_tilewhbytes = full_tilewidthbytes * m_spec.tile_height;
+    stride_t full_tilebytes = full_tilewhbytes * m_spec.tile_depth;
     size_t prefix_bytes = m_spec.pixel_bytes (0,firstchan,true);
     std::vector<char> buf;
     for (int z = zbegin;  z < zend;  z += std::max(1,m_spec.tile_depth)) {
@@ -413,25 +454,34 @@ ImageInput::read_tiles (int xbegin, int xend, int ybegin, int yend,
                 // partial channel subsets are read into a buffer and
                 // then copied.
                 if (xw == m_spec.tile_width && yh == m_spec.tile_height &&
-                      zd == m_spec.tile_depth &&
+                      zd == m_spec.tile_depth && !perchanfile &&
                       firstchan == 0 && nchans == m_spec.nchannels) {
+                    // Full tile, either native data or not needing
+                    // per-tile data format conversion.
                     ok &= read_tile (x, y, z, format, tilestart,
                                      xstride, ystride, zstride);
                 } else {
-                    buf.resize (m_spec.tile_bytes());
-                    ok &= read_tile (x, y, z, format, &buf[0],
-                                     full_pixelsize,
-                                     full_pixelsize*m_spec.tile_width,
-                                     full_pixelsize*m_spec.tile_pixels());
+                    buf.resize (full_tilebytes);
+                    ok &= read_tile (x, y, z, 
+                                     perchanfile ? TypeDesc::UNKNOWN : format,
+                                     &buf[0], full_pixelsize,
+                                     full_tilewidthbytes, full_tilewhbytes);
                     if (ok)
                         copy_image (nchans, xw, yh, zd, &buf[prefix_bytes],
                                     pixelsize, full_pixelsize,
-                                    full_pixelsize*m_spec.tile_width,
-                                    full_pixelsize*m_spec.tile_pixels(),
+                                    full_tilewidthbytes, full_tilewhbytes,
                                     tilestart, xstride, ystride, zstride);
+                    // N.B. It looks like read_tiles doesn't handle the
+                    // per-channel data types case fully, but it does!
+                    // The call to read_tile() above handles the case of
+                    // per-channel data types, converting to to desired
+                    // format, so all we have to do on our own is the
+                    // copy_image.
                 }
                 tilestart += m_spec.tile_width * xstride;
             }
+            if (! ok)
+                break;
         }
     }
 
@@ -603,16 +653,13 @@ ImageInput::send_to_client (const char *format, ...)
 
 
 void 
-ImageInput::error (const char *format, ...)
+ImageInput::append_error (const std::string& message) const
 {
-    va_list ap;
-    va_start (ap, format);
     ASSERT (m_errmessage.size() < 1024*1024*16 &&
             "Accumulated error messages > 16MB. Try checking return codes!");
     if (m_errmessage.size())
         m_errmessage += '\n';
-    m_errmessage += Strutil::vformat (format, ap);
-    va_end (ap);
+    m_errmessage += message;
 }
 
 bool

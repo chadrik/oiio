@@ -32,6 +32,7 @@
 
 #include <cstdio>
 #include "imageio.h"
+#include "filesystem.h"
 #include "fmath.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
@@ -137,6 +138,7 @@ class BmpInput : public ImageInput {
     BmpInput () { init (); }
     virtual ~BmpInput () { close (); }
     virtual const char *format_name (void) const { return "bmp"; }
+    virtual bool valid_file (const std::string &filename) const;
     virtual bool open (const std::string &name, ImageSpec &spec);
     virtual bool close (void);
     virtual bool read_native_scanline (int y, int z, void *data);

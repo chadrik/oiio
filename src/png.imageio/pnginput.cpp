@@ -51,6 +51,7 @@ public:
     PNGInput () { init(); }
     virtual ~PNGInput () { close(); }
     virtual const char * format_name (void) const { return "png"; }
+    virtual bool valid_file (const std::string &filename) const;
     virtual bool open (const std::string &name, ImageSpec &newspec);
     virtual bool open (const std::string &name, ImageSpec &newspec,
                        const ImageSpec &config);
@@ -111,12 +112,27 @@ OIIO_PLUGIN_EXPORTS_END
 
 
 bool
+PNGInput::valid_file (const std::string &filename) const
+{
+    FILE *fd = Filesystem::fopen (filename, "rb");
+    if (! fd)
+        return false;
+    unsigned char sig[8];
+    bool ok = (fread (sig, 1, sizeof(sig), fd) == sizeof(sig) &&
+               png_sig_cmp (sig, 0, 7) == 0);
+    fclose (fd);
+    return ok;
+}
+
+
+
+bool
 PNGInput::open (const std::string &name, ImageSpec &newspec)
 {
     m_filename = name;
     m_subimage = 0;
 
-    m_file = fopen (name.c_str(), "rb");
+    m_file = Filesystem::fopen (name, "rb");
     if (! m_file) {
         error ("Could not open file \"%s\"", name.c_str());
         return false;

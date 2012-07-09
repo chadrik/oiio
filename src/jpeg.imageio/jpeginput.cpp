@@ -37,6 +37,7 @@ extern "C" {
 }
 
 #include "imageio.h"
+#include "filesystem.h"
 #include "fmath.h"
 #include "jpeg_pvt.h"
 
@@ -58,6 +59,10 @@ OIIO_PLUGIN_EXPORTS_BEGIN
     };
 
 OIIO_PLUGIN_EXPORTS_END
+
+
+static const uint32_t JPEG_MAGIC = 0xffd8ffe0, JPEG_MAGIC_OTHER_ENDIAN =  0xe0ffd8ff;
+static const uint32_t JPEG_MAGIC2 = 0xffd8ffe1, JPEG_MAGIC2_OTHER_ENDIAN =  0xe1ffd8ff;
 
 
 // For explanations of the error handling, see the "example.c" in the
@@ -109,6 +114,27 @@ JpgInput::jpegerror (my_error_ptr myerr, bool fatal)
 
 
 bool
+JpgInput::valid_file (const std::string &filename) const
+{
+    FILE *fd = Filesystem::fopen (filename, "rb");
+    if (! fd)
+        return false;
+
+    // Check magic number to assure this is a JPEG file
+    uint32_t magic = 0;
+    bool ok = (fread (&magic, sizeof(magic), 1, fd) == 1);
+    fclose (fd);
+
+    if (magic != JPEG_MAGIC && magic != JPEG_MAGIC_OTHER_ENDIAN &&
+        magic != JPEG_MAGIC2 && magic != JPEG_MAGIC2_OTHER_ENDIAN) {
+        ok = false;
+    }
+    return ok;
+}
+
+
+
+bool
 JpgInput::open (const std::string &name, ImageSpec &newspec,
                 const ImageSpec &config)
 {
@@ -125,27 +151,25 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
 {
     // Check that file exists and can be opened
     m_filename = name;
-    m_fd = fopen (name.c_str(), "rb");
+    m_fd = Filesystem::fopen (name, "rb");
     if (m_fd == NULL) {
         error ("Could not open file \"%s\"", name.c_str());
         return false;
     }
 
     // Check magic number to assure this is a JPEG file
-    int magic = 0;
-    if (fread (&magic, 4, 1, m_fd) != 1) {
+    uint32_t magic = 0;
+    if (fread (&magic, sizeof(magic), 1, m_fd) != 1) {
         error ("Empty file \"%s\"", name.c_str());
         close_file ();
         return false;
     }
 
     rewind (m_fd);
-    const int JPEG_MAGIC = 0xffd8ffe0, JPEG_MAGIC_OTHER_ENDIAN =  0xe0ffd8ff;
-    const int JPEG_MAGIC2 = 0xffd8ffe1, JPEG_MAGIC2_OTHER_ENDIAN =  0xe1ffd8ff;
     if (magic != JPEG_MAGIC && magic != JPEG_MAGIC_OTHER_ENDIAN &&
         magic != JPEG_MAGIC2 && magic != JPEG_MAGIC2_OTHER_ENDIAN) {
         close_file ();
-        error ("\"%s\" is a JPEG file, magic number doesn't match", name.c_str());
+        error ("\"%s\" is not a JPEG file, magic number doesn't match", name.c_str());
         return false;
     }
 

@@ -52,6 +52,7 @@ using boost::algorithm::iequals;
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/compare.hpp>
 
+#include "ivutils.h"
 #include "strutil.h"
 #include "fmath.h"
 #include "timer.h"
@@ -326,6 +327,11 @@ IvGL::create_shaders (void)
     }
     if (m_shaders_created)
         return;
+    
+    //initialize shader object handles for abort function
+    m_shader_program = 0;
+    m_vertex_shader = 0;
+    m_fragment_shader = 0;
 
     // When using extensions to support shaders, we need to load the function
     // entry points (which is actually done by GLEW) and then call them. So
@@ -357,7 +363,8 @@ IvGL::create_shaders (void)
     if (! status) {
         std::cerr << "vertex shader compile status: " << status << "\n";
         print_shader_log (std::cerr, m_vertex_shader);
-        // FIXME: How to handle this error?
+        create_shaders_abort ();
+        return;
     }
     if (m_shaders_using_extensions) {
         glAttachObjectARB (m_shader_program, m_vertex_shader);
@@ -381,7 +388,8 @@ IvGL::create_shaders (void)
     if (! status) {
         std::cerr << "fragment shader compile status: " << status << "\n";
         print_shader_log(std::cerr, m_fragment_shader);
-        // FIXME: How to handle this error?
+        create_shaders_abort ();
+        return;
     }
     if (m_shaders_using_extensions) {
         glAttachObjectARB (m_shader_program, m_fragment_shader);
@@ -405,7 +413,6 @@ IvGL::create_shaders (void)
     }
     if (! linked) {
         std::cerr << "NOT LINKED\n";
-        // FIXME: How to handle this error?
         char buf[10000];
         buf[0] = 0;
         GLsizei len;
@@ -415,9 +422,40 @@ IvGL::create_shaders (void)
             glGetProgramInfoLog (m_shader_program, sizeof(buf), &len, buf);
         }
         std::cerr << "link log:\n" << buf << "---\n";
+        create_shaders_abort ();
+        return;
     }
 
     m_shaders_created = true;
+}
+
+
+
+void
+IvGL::create_shaders_abort (void)
+{
+    if (m_shaders_using_extensions) {
+        glUseProgramObjectARB (0);
+        if (m_shader_program)
+            //this will also detach related shaders
+            glDeleteObjectARB (m_shader_program);
+        if (m_vertex_shader)
+            glDeleteObjectARB (m_vertex_shader);
+        if (m_fragment_shader)
+            glDeleteObjectARB (m_fragment_shader);
+    }
+    else {
+        glUseProgram (0);        
+        if (m_shader_program)
+            glDeleteProgram (m_shader_program);
+        if (m_vertex_shader)
+            glDeleteShader (m_vertex_shader);
+        if (m_fragment_shader)
+            glDeleteShader (m_fragment_shader);
+    }
+    
+    GLERRPRINT ("After delete shaders");    
+    m_use_shaders = false;
 }
 
 
@@ -773,7 +811,7 @@ IvGL::paint_pixelview ()
 
         void *zoombuffer = alloca ((xend-xbegin)*(yend-ybegin)*nchannels*spec.channel_bytes());
         if (! m_use_shaders) {
-            img->copy_pixels (spec.x + xbegin, spec.x + xend,
+            img->get_pixels (spec.x + xbegin, spec.x + xend,
                     spec.y + ybegin, spec.y + yend,
                     spec.format, zoombuffer);
         } else {
@@ -1021,10 +1059,6 @@ IvGL::view (float xcenter, float ycenter, float zoom, bool redraw)
     m_centery = ycenter;
     m_zoom = zoom;
 
-    IvImage *img = m_viewer.cur();
-    if (img) {
-        clamp_view_to_window ();
-    }
     if (redraw)
         trigger_redraw ();
 }
@@ -1198,27 +1232,16 @@ IvGL::mouseMoveEvent (QMouseEvent *event)
 }
 
 
-
 void
 IvGL::wheelEvent (QWheelEvent *event)
 {
     m_mouse_activation = false;
     if (event->orientation() == Qt::Vertical) {
-        int degrees = event->delta() / 8;
-        if (true || (event->modifiers() & Qt::AltModifier)) {
-            // Holding down Alt while wheeling makes smooth zoom of small
-            // increments
-            float z = m_viewer.zoom();
-            z *= 1.0 + 0.005*degrees;
-            z = Imath::clamp (z, 0.01f, 256.0f);
-            m_viewer.zoom (z);
-            m_viewer.fitImageToWindowAct->setChecked (false);
-        } else {
-            if (degrees > 5)
-                m_viewer.zoomIn ();
-            else if (degrees < -5)
-                m_viewer.zoomOut ();
-        }
+        // TODO: Update this to keep the zoom centered on the event .x, .y
+        float oldzoom = m_viewer.zoom();
+        float newzoom = (event->delta()>0) ? \
+            pow2roundupf (oldzoom) : pow2rounddownf (oldzoom);
+        m_viewer.zoom (newzoom);
         event->accept();
     }
 }
@@ -1543,7 +1566,7 @@ IvGL::load_texture (int x, int y, int width, int height, float percent)
     // it safely since ImageBuf has a cache underneath and the whole image
     // may not be resident at once.
     if (! m_use_shaders) {
-        m_current_image->copy_pixels (x, x + width, y, y + height,
+        m_current_image->get_pixels (x, x + width, y, y + height,
                                       spec.format, &m_tex_buffer[0]);
     } else {
         m_current_image->copy_pixel_channels (x, x+width, y, y+height,

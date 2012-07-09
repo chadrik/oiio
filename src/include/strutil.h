@@ -49,6 +49,8 @@
 #include "export.h"
 #include "version.h"
 
+#include "tinyformat.h"
+
 #ifndef OPENIMAGEIO_PRINTF_ARGS
 #   ifndef __GNUC__
 #       define __attribute__(x)
@@ -76,14 +78,28 @@ OIIO_NAMESPACE_ENTER
 /// @brief     String-related utilities.
 namespace Strutil {
 
-
-/// Return a std::string formatted from printf-like arguments.
+/// Construct a std::string in a printf-like fashion.  In other words,
+/// something like:
+///    std::string s = Strutil::format ("blah %d %g", (int)foo, (float)bar);
 ///
-std::string DLLPUBLIC format (const char *fmt, ...)
+/// The printf argument list is fully typesafe via tinyformat; format
+/// conceptually has the signature
+///
+/// std::string Strutil::format (const char *fmt, ...);
+TINYFORMAT_WRAP_FORMAT (std::string, format, /**/,
+    std::ostringstream msg;, msg, return msg.str();)
+
+/// Return a std::string formatted from printf-like arguments.  Like the
+/// real sprintf, this is not guaranteed type-safe and is not extensible
+/// like format().  You would only want to use this instead of the safe
+/// format() in rare situations where you really need to use obscure
+/// printf features that aren't supported by tinyformat.
+std::string DLLPUBLIC format_raw (const char *fmt, ...)
                                          OPENIMAGEIO_PRINTF_ARGS(1,2);
 
 /// Return a std::string formatted from printf-like arguments -- passed
-/// already as a va_list.
+/// already as a va_list.  Like vsprintf, this is not guaranteed
+/// type-safe and is not extensible like format().
 std::string DLLPUBLIC vformat (const char *fmt, va_list ap)
                                          OPENIMAGEIO_PRINTF_ARGS(1,0);
 
@@ -179,15 +195,12 @@ void DLLPUBLIC to_upper (std::string &a);
 
 
 
-/// C++ functor wrapper class for using strhash for hash_map or hash_set.
-/// The way this is used, in conjunction with StringEqual, to build an
-/// efficient hash_map for char*'s or std::string's is as follows:
+/// C++ functor wrapper class for using strhash for unordered_map or
+/// unordered_set.  The way this is used, in conjunction with
+/// StringEqual, to build an efficient hash map for char*'s or
+/// std::string's is as follows:
 /// \code
-///   #ifdef OIIO_HAVE_BOOST_UNORDERED_MAP
 ///    boost::unordered_map <const char *, Key, Strutil::StringHash, Strutil::StringEqual>
-///   #else
-///    hash_map <const char *, Key, Strutil::StringHash, Strutil::StringEqual>
-///   #endif
 /// \endcode
 class StringHash {
 public:

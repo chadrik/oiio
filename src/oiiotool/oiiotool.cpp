@@ -74,6 +74,12 @@ static Oiiotool ot;
 void
 Oiiotool::read (ImageRecRef img)
 {
+    // If the image is already elaborated, take an early out, both to
+    // save time, but also because we only want to do the format and
+    // tile adjustments below as images are read in fresh from disk.
+    if (img->elaborated())
+        return;
+
     // Cause the ImageRec to get read
     img->read ();
 
@@ -137,8 +143,8 @@ Oiiotool::process_pending ()
 static int
 set_threads (int argc, const char *argv[])
 {
-    ASSERT (argc == 1);
-    OIIO_NAMESPACE::attribute ("threads", atoi(argv[0]));
+    ASSERT (argc == 2);
+    OIIO::attribute ("threads", atoi(argv[1]));
     return 0;
 }
 
@@ -182,6 +188,8 @@ adjust_output_options (ImageSpec &spec, const Oiiotool &ot)
         spec.set_format (ot.output_dataformat);
         if (ot.output_bitspersample != 0)
             spec.attribute ("oiio:BitsPerSample", ot.output_bitspersample);
+        else
+            spec.erase_attribute ("oiio:BitsPerSample");
     }
 
 //        spec.channelformats.clear ();   // FIXME: why?
@@ -310,7 +318,7 @@ output_file (int argc, const char *argv[])
         std::time_t in_time = ir->time();
         if (! metadatatime.empty())
             DateTime_to_time_t (metadatatime.c_str(), in_time);
-        boost::filesystem::last_write_time (filename, in_time);
+        Filesystem::last_write_time (filename, in_time);
     }
 
     ot.curimg = saveimg;
@@ -324,6 +332,7 @@ set_dataformat (int argc, const char *argv[])
 {
     ASSERT (argc == 2);
     std::string s (argv[1]);
+    ot.output_bitspersample = 0;  // use the default
     if (s == "uint8")
         ot.output_dataformat = TypeDesc::UINT8;
     else if (s == "int8")
@@ -1155,6 +1164,26 @@ action_pattern (int argc, const char *argv[])
     std::string pattern = argv[1];
     if (Strutil::iequals(pattern,"black")) {
         ImageBufAlgo::zero (ib);
+    } else if (Strutil::istarts_with(pattern,"constant")) {
+        float *fill = ALLOCA (float, nchans);
+        for (int c = 0;  c < nchans;  ++c)
+            fill[c] = 1.0f;
+        size_t pos;
+        while ((pos = pattern.find_first_of(":")) != std::string::npos) {
+            pattern = pattern.substr (pos+1, std::string::npos);
+            if (Strutil::istarts_with(pattern,"color=")) {
+                // Parse comma-separated color list
+                size_t numpos = 6;
+                for (int c = 0; c < nchans && numpos < pattern.size() && pattern[numpos] != ':'; ++c) {
+                    fill[c] = atof (pattern.c_str()+numpos);
+                    while (numpos < pattern.size() && pattern[numpos] != ':' && pattern[numpos] != ',')
+                        ++numpos;
+                    if (pattern[numpos])
+                        ++numpos;
+                }
+            }
+        }
+        ImageBufAlgo::fill (ib, fill);
     } else if (Strutil::istarts_with(pattern,"checker")) {
         int width = 8;
         size_t pos;
@@ -1195,7 +1224,7 @@ action_capture (int argc, const char *argv[])
     ImageBuf ib;
     ImageBufAlgo::capture_image (ib, camera, TypeDesc::FLOAT);
     ImageRecRef img (new ImageRec ("capture", ib.spec(), ot.imagecache));
-    (*img)() = ib;
+    (*img)().copy (ib);
     ot.push (img);
     return 0;
 }
@@ -1278,7 +1307,7 @@ action_resize (int argc, const char *argv[])
     ImageSpec newspec = Aspec;
 
     adjust_geometry (newspec.width, newspec.height,
-                     newspec.x, newspec.y, argv[1]);
+                     newspec.x, newspec.y, argv[1], true);
     if (newspec.width == Aspec.width && newspec.height == Aspec.height)
         return 0;  // nothing to do
 
@@ -1367,14 +1396,42 @@ action_fixnan (int argc, const char *argv[])
 
 
 
+static int
+action_over (int argc, const char *argv[])
+{
+    if (ot.postpone_callback (2, action_over, argc, argv))
+        return 0;
+
+    ImageRecRef B (ot.pop());
+    ImageRecRef A (ot.pop());
+    ot.read (A);
+    ot.read (B);
+    const ImageBuf &Aib ((*A)());
+    const ImageBuf &Bib ((*B)());
+    const ImageSpec &specA = Aib.spec();
+    const ImageSpec &specB = Bib.spec();
+
+    // Create output image specification.
+    ImageSpec specR = specA;
+    set_roi (specR, roi_union (get_roi(specA), get_roi(specB)));
+    specR.nchannels = std::max (specA.nchannels, specB.nchannels);
+    if (specR.alpha_channel < 0 && specR.nchannels == 4)
+        specR.alpha_channel = 3;
+
+    ot.push (new ImageRec ("irec", specR, ot.imagecache));
+    ImageBuf &Rib ((*ot.curimg)());
+
+    ImageBufAlgo::over (Rib, Aib, Bib);
+    return 0;
+}
+
+
+
 static void
 getargs (int argc, char *argv[])
 {
     bool help = false;
     ArgParse ap;
-    bool dummybool;
-    int dummyint;
-    std::string dummystr;
     ap.options ("oiiotool -- simple image processing operations\n"
                 OIIO_INTRO_STRING "\n"
                 "Usage:  oiiotool [filename,option,action]...\n",
@@ -1392,9 +1449,9 @@ getargs (int argc, char *argv[])
                 "--noclobber", &ot.noclobber, "", // synonym
                 "--threads %@ %d", set_threads, &ot.threads, "Number of threads (default 0 == #cores)",
                 "<SEPARATOR>", "Commands that write images:",
-                "-o %@ %s", output_file, &dummystr, "Output the current image to the named file",
+                "-o %@ %s", output_file, NULL, "Output the current image to the named file",
                 "<SEPARATOR>", "Options that affect subsequent image output:",
-                "-d %@ %s", set_dataformat, &dummystr,
+                "-d %@ %s", set_dataformat, NULL,
                     "Set the output data format to one of: "
                     "uint8, sint8, uint10, uint12, uint16, sint16, half, float, double",
                 "--scanline", &ot.output_scanline, "Output scanline images",
@@ -1409,51 +1466,52 @@ getargs (int argc, char *argv[])
                 "--noautocrop %!", &ot.output_autocrop, 
                     "Do not automatically crop images whose formats don't support separate pixel data and full/display windows",
                 "<SEPARATOR>", "Options that change current image metadata (but not pixel values):",
-                "--attrib %@ %s %s", set_any_attribute, &dummystr, &dummystr, "Sets metadata attribute (name, value)",
-                "--sattrib %@ %s %s", set_string_attribute, &dummystr, &dummystr, "Sets string metadata attribute (name, value)",
-                "--caption %@ %s", set_caption, &dummystr, "Sets caption (ImageDescription metadata)",
-                "--keyword %@ %s", set_keyword, &dummystr, "Add a keyword",
-                "--clear-keywords %@", clear_keywords, &dummybool, "Clear all keywords",
-                "--orientation %@ %d", set_orientation, &dummyint, "Set the assumed orientation",
-                "--rotcw %@", rotate_orientation, &dummybool, "Rotate orientation 90 deg clockwise",
-                "--rotccw %@", rotate_orientation, &dummybool, "Rotate orientation 90 deg counter-clockwise",
-                "--rot180 %@", rotate_orientation, &dummybool, "Rotate orientation 180 deg",
-                "--origin %@ %s", set_origin, &dummystr,
+                "--attrib %@ %s %s", set_any_attribute, NULL, NULL, "Sets metadata attribute (name, value)",
+                "--sattrib %@ %s %s", set_string_attribute, NULL, NULL, "Sets string metadata attribute (name, value)",
+                "--caption %@ %s", set_caption, NULL, "Sets caption (ImageDescription metadata)",
+                "--keyword %@ %s", set_keyword, NULL, "Add a keyword",
+                "--clear-keywords %@", clear_keywords, NULL, "Clear all keywords",
+                "--orientation %@ %d", set_orientation, NULL, "Set the assumed orientation",
+                "--rotcw %@", rotate_orientation, NULL, "Rotate orientation 90 deg clockwise",
+                "--rotccw %@", rotate_orientation, NULL, "Rotate orientation 90 deg counter-clockwise",
+                "--rot180 %@", rotate_orientation, NULL, "Rotate orientation 180 deg",
+                "--origin %@ %s", set_origin, NULL,
                     "Set the pixel data window origin (e.g. +20+10)",
-                "--fullsize %@ %s", set_fullsize, &dummystr, "Set the display window (e.g., 1920x1080, 1024x768+100+0, -20-30)",
-                "--fullpixels %@", set_full_to_pixels, &dummybool, "Set the 'full' image range to be the pixel data window",
+                "--fullsize %@ %s", set_fullsize, NULL, "Set the display window (e.g., 1920x1080, 1024x768+100+0, -20-30)",
+                "--fullpixels %@", set_full_to_pixels, NULL, "Set the 'full' image range to be the pixel data window",
                 "<SEPARATOR>", "Options that affect subsequent actions:",
-                "--fail %g", &ot.diff_failthresh, "",
-                "--failpercent %g", &ot.diff_failpercent, "",
-                "--hardfail %g", &ot.diff_hardfail, "",
-                "--warn %g", &ot.diff_warnthresh, "",
-                "--warnpercent %g", &ot.diff_warnpercent, "",
-                "--hardwarn %g", &ot.diff_hardwarn, "",
+                "--fail %g", &ot.diff_failthresh, "Failure threshold difference (0.000001)",
+                "--failpercent %g", &ot.diff_failpercent, "Allow this percentage of failures in diff (0)",
+                "--hardfail %g", &ot.diff_hardfail, "Fail diff if any one pixel exceeds this error (infinity)",
+                "--warn %g", &ot.diff_warnthresh, "Warning threshold difference (0.00001)",
+                "--warnpercent %g", &ot.diff_warnpercent, "Allow this percentage of warnings in diff (0)",
+                "--hardwarn %g", &ot.diff_hardwarn, "Warn if any one pixel difference exceeds this error (infinity)",
                 "<SEPARATOR>", "Actions:",
-                "--create %@ %s %d", action_create, &dummystr, &dummyint,
+                "--create %@ %s %d", action_create, NULL, NULL,
                         "Create a blank image (args: geom, channels)",
                 "--pattern %@ %s %s %d", action_pattern, NULL, NULL, NULL,
                         "Create a patterned image (args: pattern, geom, channels)",
                 "--capture %@", action_capture, NULL,
                         "Capture an image (args: camera=%%d)",
-                "--unmip %@", action_unmip, &dummybool, "Discard all but the top level of a MIPmap",
-                "--selectmip %@ %d", action_selectmip, &dummyint,
+                "--unmip %@", action_unmip, NULL, "Discard all but the top level of a MIPmap",
+                "--selectmip %@ %d", action_selectmip, NULL,
                     "Select just one MIP level (0 = highest res)",
-                "--subimage %@ %d", action_select_subimage, &dummyint, "Select just one subimage",
-                "--diff %@", action_diff, &dummybool, "Print report on the difference of two images (modified by --fail, --failpercent, --hardfail, --warn, --warnpercent --hardwarn)",
-                "--add %@", action_add, &dummybool, "Add two images",
-                "--sub %@", action_sub, &dummybool, "Subtract two images",
-                "--abs %@", action_abs, &dummybool, "Take the absolute value of the image pixels",
-                "--flip %@", action_flip, &dummybool, "Flip the image vertically (top<->bottom)",
-                "--flop %@", action_flop, &dummybool, "Flop the image horizontally (left<->right)",
-                "--flipflop %@", action_flipflop, &dummybool, "Flip and flop the image (180 degree rotation)",
-                "--crop %@ %s", action_crop, &dummystr, "Set pixel data resolution and offset, cropping or padding if necessary (WxH+X+Y or xmin,ymin,xmax,ymax)",
-                "--croptofull %@", action_croptofull, &dummybool, "Crop or pad to make pixel data region match the \"full\" region",
-                "--resize %@ %s", action_resize, &dummystr, "Resize (640x480, 50%)",
+                "--subimage %@ %d", action_select_subimage, NULL, "Select just one subimage",
+                "--diff %@", action_diff, NULL, "Print report on the difference of two images (modified by --fail, --failpercent, --hardfail, --warn, --warnpercent --hardwarn)",
+                "--add %@", action_add, NULL, "Add two images",
+                "--sub %@", action_sub, NULL, "Subtract two images",
+                "--abs %@", action_abs, NULL, "Take the absolute value of the image pixels",
+                "--over %@", action_over, NULL, "'Over' composite of two images",
+                "--flip %@", action_flip, NULL, "Flip the image vertically (top<->bottom)",
+                "--flop %@", action_flop, NULL, "Flop the image horizontally (left<->right)",
+                "--flipflop %@", action_flipflop, NULL, "Flip and flop the image (180 degree rotation)",
+                "--crop %@ %s", action_crop, NULL, "Set pixel data resolution and offset, cropping or padding if necessary (WxH+X+Y or xmin,ymin,xmax,ymax)",
+                "--croptofull %@", action_croptofull, NULL, "Crop or pad to make pixel data region match the \"full\" region",
+                "--resize %@ %s", action_resize, NULL, "Resize (640x480, 50%)",
                 "--fixnan %@ %s", action_fixnan, NULL, "Fix NaN/Inf values in the image (options: none, black, box3)",
-                "--pop %@", action_pop, &dummybool,
+                "--pop %@", action_pop, NULL,
                     "Throw away the current image",
-                "--dup %@", action_dup, &dummybool,
+                "--dup %@", action_dup, NULL,
                     "Duplicate the current image (push a copy onto the stack)",
                 "<SEPARATOR>", "Color management:",
                 "--iscolorspace %@ %s", set_colorspace, NULL,

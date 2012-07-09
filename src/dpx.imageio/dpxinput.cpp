@@ -34,6 +34,7 @@
 #include "typedesc.h"
 #include "imageio.h"
 #include "fmath.h"
+#include "strutil.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -43,6 +44,7 @@ public:
     DPXInput () : m_stream(NULL), m_dataPtr(NULL) { init(); }
     virtual ~DPXInput () { close(); }
     virtual const char * format_name (void) const { return "dpx"; }
+    virtual bool valid_file (const std::string &filename) const;
     virtual bool open (const std::string &name, ImageSpec &newspec);
     virtual bool close ();
     virtual int current_subimage (void) const { return m_subimage; }
@@ -93,6 +95,25 @@ DLLEXPORT const char * dpx_input_extensions[] = {
 };
 
 OIIO_PLUGIN_EXPORTS_END
+
+
+
+bool
+DPXInput::valid_file (const std::string &filename) const
+{
+    InStream *stream = new InStream();
+    if (! stream)
+        return false;
+    bool ok = false;
+    if (stream->Open(filename.c_str())) {
+        dpx::Reader dpx;
+        dpx.SetInStream(stream);
+        ok = dpx.ReadHeader();
+        stream->Close();
+    }
+    delete stream;
+    return ok;
+}
 
 
 
@@ -236,7 +257,7 @@ DPXInput::seek_subimage (int subimage, int miplevel, ImageSpec &newspec)
             {
                 for (int i = 0;
                     i < m_dpx.header.ImageElementComponentCount(subimage); i++) {
-                    std::string ch = "channel" + i;
+                    std::string ch = Strutil::format("channel%d", i);
                     m_spec.channelnames.push_back(ch);
                 }
             }
@@ -498,7 +519,7 @@ DPXInput::seek_subimage (int subimage, int miplevel, ImageSpec &newspec)
         case dpx::k1125LineProgressive169AR:
             tmpstr = "YCbCr 1125p, 16:9 (SMPTE 274M)";
             break;
-        case 0xFF:
+        case dpx::k255:
             // don't set the attribute at all
             break;
         default:
