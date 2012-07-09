@@ -37,9 +37,9 @@ void MainWindow::setupOCIO()
     int errorcount = 0;
     std::cout << "OpenColorIO Library Version: " << OCIO::GetVersion() << std::endl;
     std::cout << "OpenColorIO Library VersionHex: " << OCIO::GetVersionHex() << std::endl;
-    std::string inputconfig = "/madcrew/applications/SDK/ocio/imageworks-OpenColorIO-Configs-fc29cd9/nuke-default/config.ocio";
-    std::cout << "Loading " << inputconfig << std::endl;
-    m_ocio_config = OCIO::Config::CreateFromFile(inputconfig.c_str());
+//    std::cout << "Loading " << inputconfig << std::endl;
+//    m_ocio_config = OCIO::Config::CreateFromFile(inputconfig.c_str());
+    m_ocio_config = OCIO::Config::CreateFromEnv();
     std::cout << "Default Display: " << m_ocio_config->getDefaultDisplay() << std::endl;
     std::cout << "Default View: " << m_ocio_config->getDefaultView(m_ocio_config->getDefaultDisplay()) << std::endl;
     std::cout << "** ColorSpaces **" << std::endl;
